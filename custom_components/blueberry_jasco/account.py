@@ -2,44 +2,18 @@
 from __future__ import annotations
 import base64
 import hashlib
-import io
 import ipaddress
 import re
-import zipfile
-from pathlib import Path
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
 ROOT = 'https://myts.yunext.com'
 
 
 def load_app_key(path):
-    """Find a valid RSA PKCS#8 string in app DEX files, without executing code."""
-    def inspect(archive):
-        for item in archive.infolist():
-            if item.file_size > 80 * 1024 * 1024:
-                continue
-            if item.filename.endswith('.apk'):
-                with zipfile.ZipFile(io.BytesIO(archive.read(item))) as nested:
-                    result = inspect(nested)
-                    if result is not None:
-                        return result
-            elif item.filename.endswith('.dex'):
-                for candidate in re.findall(rb'30[0-9a-fA-F]{1200,10000}', archive.read(item)):
-                    try:
-                        key = serialization.load_der_private_key(bytes.fromhex(candidate.decode()), None)
-                        if isinstance(key, rsa.RSAPrivateKey) and key.key_size >= 2048:
-                            return key
-                    except (ValueError, TypeError):
-                        continue
-        return None
-    if Path(path).stat().st_size > 256 * 1024 * 1024:
-        raise ValueError('App archive is too large')
-    with zipfile.ZipFile(path) as archive:
-        key = inspect(archive)
-    if key is None:
-        raise ValueError('No compatible signing material found in the app')
-    return key
+    """Compatibility helper for callers that only need signing material."""
+    from .app_archive import load_app_material
+    return load_app_material(path).key
 
 
 def signed_fields(fields, key):
@@ -49,24 +23,66 @@ def signed_fields(fields, key):
     return fields
 
 
-async def inventory(session, username, password, key):
-    fields = signed_fields({'username': username, 'appType': '1',
-                            'phoneType': 'Home Assistant', 'phoneSysVersion': 'Python', 'appVersion': '2.9',
-                            'password': hashlib.md5(password.encode(), usedforsecurity=False).hexdigest().upper()}, key)
-    async with session.post(ROOT + '/api/service/user/login/MYTS', data=fields, timeout=20) as response:
-        response.raise_for_status()
-        login = await response.json()
-    if login.get('success') is not True or not isinstance(login.get('data'), dict):
-        raise ValueError('myTS rejected account login')
-    token = login['data'].get('token')
-    if not token:
-        raise ValueError('myTS login returned no token')
-    async with session.get(ROOT + '/api/app/device/list', params=signed_fields({'token': token}, key), timeout=20) as response:
-        response.raise_for_status()
-        result = await response.json()
-    if result.get('success') is not True or not isinstance(result.get('data'), list):
-        raise ValueError('myTS did not return a device list')
-    return result['data']
+class AccountError(ValueError):
+    def __init__(self, stage, reason):
+        self.stage = stage
+        super().__init__(reason)
+
+
+def provider_code(payload):
+    value = str(payload.get('code', 'unknown'))
+    # Do not echo response messages, credentials, tokens, or response bodies.
+    return value if re.fullmatch(r'-?\d{1,10}', value) else 'unknown'
+
+
+async def _provider_json(session, method, path, fields, stage):
+    from aiohttp import ClientError, ClientConnectorCertificateError, ClientSSLError
+    options = {'data': fields} if method == 'POST' else {'params': fields}
+    try:
+        async with session.request(method, ROOT + path, allow_redirects=False, timeout=20, **options) as response:
+            if not 200 <= response.status < 300:
+                raise AccountError(stage, f'myTS {stage} returned HTTP {response.status}.')
+            try:
+                # Retrofit decodes JSON regardless of the Content-Type header.
+                payload = await response.json(content_type=None)
+            except ValueError as err:
+                raise AccountError(stage, f'myTS {stage} returned a non-JSON response.') from err
+    except (ClientConnectorCertificateError, ClientSSLError) as err:
+        raise AccountError('cloud_tls', f'HTTPS certificate verification failed during myTS {stage}.') from err
+    except (ClientError, OSError, TimeoutError) as err:
+        raise AccountError(stage, f'Could not reach the myTS {stage} endpoint.') from err
+    if not isinstance(payload, dict):
+        raise AccountError(stage, f'myTS {stage} returned an unexpected response shape.')
+    if payload.get('success') not in (True, 'true'):
+        raise AccountError(stage, f'myTS {stage} was rejected, provider code {provider_code(payload)}.')
+    return payload.get('data')
+
+
+async def _inventory(session, username, password, material):
+    fields = signed_fields({'username': username.strip(), 'appType': '1',
+                            'phoneType': 'Home Assistant', 'phoneSysVersion': 'Python',
+                            'appVersion': material.version,
+                            'password': hashlib.md5(password.encode(), usedforsecurity=False).hexdigest().upper()}, material.key)
+    login = await _provider_json(session, 'POST', '/api/service/user/login/MYTS', fields, 'login')
+    if not isinstance(login, dict) or not isinstance(login.get('token'), str) or not login['token']:
+        raise AccountError('login', 'myTS login succeeded but returned no usable account token.')
+    result = await _provider_json(session, 'GET', '/api/app/device/list',
+                                  signed_fields({'token': login['token']}, material.key), 'inventory')
+    if not isinstance(result, list):
+        raise AccountError('inventory', 'myTS inventory returned an unexpected device list.')
+    return result
+
+
+async def inventory(session, username, password, material):
+    from aiohttp import ClientSession, TCPConnector, ClientTimeout
+    from .cloud_dns import MyTSResolver
+    resolver = MyTSResolver(session)
+    try:
+        async with ClientSession(connector=TCPConnector(resolver=resolver, use_dns_cache=False),
+                                 timeout=ClientTimeout(total=25)) as cloud:
+            return await _inventory(cloud, username, password, material)
+    finally:
+        await resolver.close()
 
 
 def normalize_mac(value):
@@ -79,6 +95,8 @@ def normalize_mac(value):
 def correlate(records, scan):
     addresses = {}
     for row in scan.get('arp', []):
+        if not isinstance(row, dict):
+            continue
         try:
             mac = normalize_mac(row.get('mac', row.get('hw-address', '')))
             ip = str(ipaddress.IPv4Address(row['ip']))
@@ -88,6 +106,8 @@ def correlate(records, scan):
             continue
     found, missing = [], []
     for record in records:
+        if not isinstance(record, dict):
+            continue
         try:
             mac = normalize_mac(record['macAddress'])
             device = {'mac': mac, 'name': record.get('deviceName') or 'myTS device',

@@ -27,7 +27,7 @@
       },
       "account": {
         "title": "Find myTS devices",
-        "description": "Sign in to read device names and protocol identifiers. Supply a myTS APK or APKS archive once at the path below. Setup extracts signing material locally and matches account devices to your LAN through BlueberryProxy and a read-only broadcast query. Passwords and the signing key are not saved.",
+        "description": "Sign in to read your myTS device inventory. The app package and version are read automatically from the APK/APKS manifest; no app-version field is needed. Supply the app archive path on the Home Assistant filesystem. Passwords and signing keys are not saved.\n\nDetected app version {app_version}. {details}",
         "data": {
           "username": "myTS email",
           "password": "myTS password",
@@ -48,10 +48,16 @@
       "not_blueberry_proxy": "This API is not BlueberryProxy",
       "incomplete_device": "Enter all five device fields or leave all five empty",
       "invalid_relay_address": "Enter a private IPv4 address for the local relay",
-      "app_required": "Place your myTS APK or APKS archive at the specified path on Home Assistant.",
-      "account_failed": "Could not read the app, sign in, or reach BlueberryProxy. Check the app version, credentials, and proxy URL.",
+      "app_required": "The app archive was not found on Home Assistant. Use its path on the HA filesystem, not the path on your phone or computer.",
       "no_devices": "No myTS devices are registered to this account.",
-      "no_lan_match": "Account devices were found but no LAN addresses matched. Wake the devices and ensure HA and BlueberryProxy can access the same LAN."
+      "no_lan_match": "Account devices were found but no LAN addresses matched. Wake the devices and ensure HA and BlueberryProxy can access the same LAN.",
+      "archive_failed": "Could not read compatible myTS app metadata or signing material. See the archive detail above.",
+      "proxy_failed": "Could not validate the BlueberryProxy URL. See the proxy detail above.",
+      "login_failed": "myTS sign-in failed. See the HTTP status or provider code above.",
+      "inventory_failed": "myTS sign-in completed, but the account device list could not be read. See the provider detail above.",
+      "scan_failed": "myTS account access worked, but the BlueberryProxy LAN scan failed.",
+      "cloud_tls_failed": "The myTS cloud HTTPS certificate could not be verified. Certificate verification remains enabled.",
+      "unsupported_inventory": "The account returned devices, but none contained the supported MAC and protocol identifiers."
     },
     "abort": {
       "wrong_account": "Sign in to the same account as this integration entry.",

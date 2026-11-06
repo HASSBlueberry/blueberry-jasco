@@ -5,10 +5,14 @@ from aiohttp import ClientError
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import DOMAIN
-from .account import load_app_key, inventory, correlate, discover_local
+from .account import inventory, correlate, discover_local, AccountError
+from .app_archive import load_app_material, AppArchiveError
 from homeassistant.helpers import config_validation as cv
-import zipfile
+import logging
 from pathlib import Path
+
+_LOGGER = logging.getLogger(__name__)
+
 
 class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -36,19 +40,33 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         existing_urls = [entry.data['url'] for entry in self.hass.config_entries.async_entries()
                          if entry.domain in ('blueberry_jasco', 'blueberry_velux') and entry.data.get('url')]
         default_url = existing_urls[0] if existing_urls else 'http://127.0.0.1:8054'
+        phase = 'archive'
+        version = getattr(self, '_detected_version', 'not yet read')
+        details = ''
         if user_input:
+            version = 'not yet read'
+            default_app = user_input.get('app_archive') or default_app
+            default_url = user_input['url'].strip().rstrip('/')
             try:
-                key = await self.hass.async_add_executor_job(load_app_key, user_input.get('app_archive') or default_app)
+                material = await self.hass.async_add_executor_job(load_app_material, default_app)
+                self._detected_version = version = material.version
                 session = async_get_clientsession(self.hass)
-                records = await inventory(session, user_input['username'], user_input['password'], key)
-                base = user_input['url'].rstrip('/')
+                phase = 'proxy'
+                base = default_url
                 async with session.get(base + '/status', timeout=8) as response:
                     response.raise_for_status()
-                    if (await response.json()).get('name') != 'blueberryProxy':
-                        raise ValueError('Not BlueberryProxy')
+                    status = await response.json(content_type=None)
+                    if not isinstance(status, dict) or status.get('name') != 'blueberryProxy':
+                        raise ValueError('not_blueberry_proxy')
+                phase = 'login'
+                records = await inventory(session, user_input['username'], user_input['password'], material)
+                phase = 'scan'
                 async with session.get(base + '/scan', timeout=15) as response:
                     response.raise_for_status()
-                    devices, missing = correlate(records, await response.json())
+                    scan = await response.json(content_type=None)
+                    if not isinstance(scan, dict) or not isinstance(scan.get('arp', []), list):
+                        raise ValueError('invalid_proxy_scan')
+                    devices, missing = correlate(records, scan)
                 if missing:
                     try:
                         local = await self.hass.async_add_executor_job(discover_local, missing)
@@ -59,22 +77,38 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     missing = [device for device in missing if device['mac'] not in local_macs]
                 if not records:
                     errors['base'] = 'no_devices'
+                elif not devices and not missing:
+                    errors['base'] = 'unsupported_inventory'
                 elif not devices:
                     errors['base'] = 'no_lan_match'
                 else:
                     self._account_data = {'url': base, 'verify_ssl': True, 'cloud_relay': False,
-                                          'devices': devices, 'unmatched_devices': missing}
+                                          'devices': devices, 'unmatched_devices': missing,
+                                          'app_version': material.version}
                     self._account_username = user_input['username'].strip().lower()
                     return await self.async_step_devices()
             except FileNotFoundError:
                 errors['base'] = 'app_required'
-            except (ClientError, TimeoutError, OSError, ValueError, zipfile.BadZipFile):
-                errors['base'] = 'account_failed'
+            except AppArchiveError as err:
+                errors['base'] = 'archive_failed'
+                details = str(err)
+            except AccountError as err:
+                errors['base'] = err.stage + '_failed'
+                details = str(err)
+                _LOGGER.warning('myTS setup failed during %s', err.stage)
+            except (ClientError, TimeoutError, OSError, ValueError) as err:
+                errors['base'] = phase + '_failed'
+                status = getattr(err, 'status', None)
+                details = f'{phase.capitalize()} returned HTTP {status}.' if status else f'{phase.capitalize()} failed ({type(err).__name__}).'
+                if phase == 'proxy' and str(err) == 'not_blueberry_proxy':
+                    details = 'The URL returned a service other than BlueberryProxy.'
+                _LOGGER.warning('myTS setup failed during %s (%s)', phase, type(err).__name__)
         return self.async_show_form(step_id='account', data_schema=vol.Schema({
-            vol.Required('username'): str, vol.Required('password'): selector.TextSelector({'type': 'password'}),
+            vol.Required('username', default=(user_input or {}).get('username', '')): str,
+            vol.Required('password'): selector.TextSelector({'type': 'password'}),
             vol.Required('url', default=default_url): str,
             vol.Optional('app_archive', default=default_app): str,
-        }), errors=errors)
+        }), errors=errors, description_placeholders={'app_version': str(version), 'details': details})
 
     async def async_step_devices(self, user_input=None):
         devices = self._account_data['devices']
@@ -85,7 +119,7 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not chosen:
                 return await self.async_step_devices()
             await self.async_set_unique_id('account:' + self._account_username)
-            data = {'url': self._account_data['url'], 'verify_ssl': True, 'cloud_relay': False, 'devices': chosen}
+            data = {'url': self._account_data['url'], 'verify_ssl': True, 'cloud_relay': False, 'devices': chosen, 'app_version': self._account_data['app_version']}
             if getattr(self, '_reconfigure_entry', None):
                 if self._reconfigure_entry.unique_id != self.unique_id:
                     return self.async_abort(reason='wrong_account')

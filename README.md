@@ -2,7 +2,7 @@
 
 ## Simplified Home Assistant setup
 
-Version 0.4 starts with a myTS email/password form and the BlueberryProxy URL.
+Version 0.4.1 starts with a myTS email/password form and the BlueberryProxy URL.
 Supply a copy of your myTS APK or APKS once on the HA filesystem at
 `/config/.storage/blueberry_jasco/myts.apks`, or enter its path in setup.
 The supplied 2.9 app archive has been checked with the extractor. The
@@ -26,6 +26,28 @@ Advanced setup retains the manual fields and experimental TLS listener. The
 simple account path leaves that listener disabled and uses local UDP for
 control. Devices absent from the LAN remain unmatched and are not given
 invented IP addresses or usable-looking controls.
+
+### App metadata and setup diagnostics
+
+The app version is read from the supplied APK or APKS Android manifest,
+including binary XML. It is not inferred from the filename or fixed to 2.9.
+Wrong application packages and unreadable manifests are reported before login.
+The archive must be on Home Assistant's filesystem; a browser download onto
+your phone or workstation is not a file on the HA server.
+
+Setup reports the detected version and the failing stage separately for archive
+reading, proxy identity, myTS login, account inventory, and LAN scan. Provider
+rejections show a numeric provider code, without echoing server messages or
+credentials. Nonstandard JSON Content-Type headers are handled like the app's
+Retrofit decoder. HTTP redirects are not followed when sending credentials.
+
+If local DNS resolves `myts.yunext.com` to a nonpublic address, the account
+client resolves that hostname through Cloudflare's HTTPS DNS service. This
+keeps cloud account access working when your own proxy redirects device
+traffic. Global DNS answers use the system resolver as usual. The request
+still uses `https://myts.yunext.com` and normal certificate and hostname
+verification. No provider IP is hardcoded and no credentials are sent to the
+DNS resolver. The fallback requires Internet access to the DoH endpoint.
 
 ## Advanced local integration
 
