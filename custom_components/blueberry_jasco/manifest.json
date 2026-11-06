@@ -1,0 +1,12 @@
+{
+  "domain": "blueberry_jasco",
+  "name": "Jasco myTouchSmart",
+  "codeowners": ["@BlueberryFaygo"],
+  "config_flow": true,
+  "documentation": "https://git.crit.rip/BlueberryFaygo/BlueberryFaygo/tree/main/sre/BlueberryJasco",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://git.crit.rip/BlueberryFaygo/BlueberryFaygo/issues",
+  "requirements": [],
+  "version": "0.3.0"
+}

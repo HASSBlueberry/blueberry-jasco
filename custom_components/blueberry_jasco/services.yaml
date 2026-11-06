@@ -1,0 +1,99 @@
+send_local_command:
+  name: Send local Jasco command
+  description: Send a LAN frame using identifiers from the Jasco device record or a captured app exchange.
+  fields:
+    ip:
+      required: true
+      selector:
+        text:
+    mac:
+      required: true
+      selector:
+        text:
+    company_code:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    device_type:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    auth_code:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    port:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 65535
+          mode: box
+    protocol_index:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 32767
+          mode: box
+    locked:
+      required: false
+      selector:
+        boolean:
+    command:
+      required: true
+      selector:
+        select:
+          options:
+            - query_state
+            - refresh
+            - read_pin
+            - set_switch
+    pin:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    state:
+      required: false
+      selector:
+        boolean:
+    confirm_control:
+      required: false
+      selector:
+        boolean:
+send_local_login:
+  name: Authenticate with local Jasco device
+  description: Send the app-observed local login payload. Credentials are sent only to the selected LAN device and are not stored by this integration.
+  fields:
+    ip:
+      required: true
+      selector:
+        text:
+    username:
+      required: true
+      selector:
+        text:
+    password:
+      required: true
+      selector:
+        text:
+          type: password
+    status:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box

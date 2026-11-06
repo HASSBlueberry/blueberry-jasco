@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Jasco myTouchSmart",
+        "description": "The myTS Wi-Fi UDP and TLS relay paths are experimental. For Jasco Z-Wave products use Home Assistant's built-in Jasco integration. For myTS Wi-Fi products, keep the vendor app as the remote-control fallback.",
+        "data": {
+          "url": "BlueberryProxy API URL",
+          "verify_ssl": "Verify HTTPS certificates",
+          "cloud_relay": "Emulate the myTS TLS control server",
+          "relay_port": "Local TLS port",
+          "relay_advertise_ip": "LAN address advertised to the app",
+          "name": "Switch name",
+          "ip": "Device IP",
+          "mac": "Device MAC",
+          "company_code": "Company code",
+          "device_type": "Device type",
+          "auth_code": "Authentication code",
+          "pin": "GPIO pin"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach BlueberryProxy",
+      "not_blueberry_proxy": "This API is not BlueberryProxy",
+      "incomplete_device": "Enter all five device fields or leave all five empty",
+      "invalid_relay_address": "Enter a private IPv4 address for the local relay"
+    }
+  }
+}
