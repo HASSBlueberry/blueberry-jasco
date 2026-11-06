@@ -9,6 +9,8 @@ from .account import inventory, correlate, discover_local, AccountError
 from .app_archive import load_app_material, AppArchiveError
 from homeassistant.helpers import config_validation as cv
 import logging
+import asyncio
+from .discovery import discover_account_devices
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,13 +70,10 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         raise ValueError('invalid_proxy_scan')
                     devices, missing = correlate(records, scan)
                 if missing:
-                    try:
-                        local = await self.hass.async_add_executor_job(discover_local, missing)
-                    except OSError:
-                        local = []
-                    devices.extend(local)
-                    local_macs = {device['mac'] for device in local}
-                    missing = [device for device in missing if device['mac'] not in local_macs]
+                    self._discovery_context = {'records': records, 'base': base, 'version': material.version,
+                                               'username': user_input['username'].strip().lower()}
+                    self._scan_parameters = {}
+                    return await self.async_step_scan()
                 if not records:
                     errors['base'] = 'no_devices'
                 elif not devices and not missing:
@@ -109,6 +108,42 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required('url', default=default_url): str,
             vol.Optional('app_archive', default=default_app): str,
         }), errors=errors, description_placeholders={'app_version': str(version), 'details': details})
+
+    async def async_step_scan(self, user_input=None):
+        if not getattr(self, '_scan_task', None):
+            async def local_probe(missing, candidates):
+                return await self.hass.async_add_executor_job(discover_local, missing, 3.0, candidates)
+            context = self._discovery_context
+            script = await self.hass.async_add_executor_job(
+                (Path(__file__).parent / 'transforms' / 'jasco-uscan.js').read_text)
+            self._scan_task = self.hass.async_create_task(discover_account_devices(
+                async_get_clientsession(self.hass), context['base'], context['records'], local_probe,
+                self._scan_parameters, scanner_script=script))
+        if not self._scan_task.done():
+            return self.async_show_progress(step_id='scan', progress_action='network_scan', progress_task=self._scan_task)
+        self._scan_result = self._scan_task.result()
+        self._scan_task = None
+        return self.async_show_progress_done(next_step_id='scan_result')
+
+    async def async_step_scan_result(self, user_input=None):
+        result = self._scan_result
+        context = self._discovery_context
+        if result['devices']:
+            self._account_data = {'url': context['base'], 'verify_ssl': True, 'cloud_relay': False,
+                                  'devices': result['devices'], 'unmatched_devices': result['missing'],
+                                  'app_version': context['version']}
+            self._account_username = context['username']
+            return await self.async_step_devices()
+        if user_input is not None:
+            cidrs = [value.strip() for value in user_input.get('cidrs', '').split(',') if value.strip()]
+            self._scan_parameters = {'cidrs': cidrs} if cidrs else {}
+            return await self.async_step_scan()
+        return self.async_show_form(step_id='scan_result', data_schema=vol.Schema({
+            vol.Optional('cidrs', default=''): str,
+        }), errors={'base': 'no_lan_match'}, description_placeholders={
+            'details': result.get('details') or 'The scan did not return a verified MAC/IP match.',
+            'job_id': result.get('job_id') or 'not started',
+        })
 
     async def async_step_devices(self, user_input=None):
         devices = self._account_data['devices']

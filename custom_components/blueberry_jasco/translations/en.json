@@ -41,6 +41,13 @@
         "data": {
           "devices": "Devices"
         }
+      },
+      "scan_result": {
+        "title": "LAN discovery results",
+        "description": "{details}\n\nScan job {job_id}. Retry with explicit CIDRs for routed networks, or leave empty to use BlueberryProxy LAN interfaces. Account sign-in is reused.",
+        "data": {
+          "cidrs": "IPv4 CIDRs, comma separated"
+        }
       }
     },
     "error": {
@@ -64,6 +71,9 @@
       "reauth_successful": "Sign-in updated.",
       "reconfigure_successful": "Device selection updated.",
       "already_configured": "This account or device is already configured."
+    },
+    "progress": {
+      "network_scan": "Scanning LAN protocols and myTS UDP responses. This can take several minutes."
     }
   }
 }

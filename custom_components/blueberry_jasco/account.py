@@ -125,13 +125,24 @@ def correlate(records, scan):
     return found, missing
 
 
-def discover_local(devices, timeout=3.0):
+def discover_local(devices, timeout=3.0, candidates=None):
     """Query only account-owned MACs and accept responses with matching headers."""
     import socket
     import time
     from .protocol import command_payload, decode_frame, encode_frame, UDP_PORT
     known = {device['mac']: device for device in devices[:128]}
     found = {}
+    targets = ['255.255.255.255']
+    for candidate in (candidates or [])[:256]:
+        try:
+            address = ipaddress.IPv4Address(candidate)
+            if address.is_private and not address.is_loopback:
+                targets.append(str(address))
+        except ValueError:
+            continue
+    targets = list(dict.fromkeys(targets))
+    if len(known) * len(targets) > 2048:
+        targets = targets[:max(1, 2048 // max(1, len(known)))]
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(('0.0.0.0', 0))
@@ -139,7 +150,11 @@ def discover_local(devices, timeout=3.0):
             frame = encode_frame(mac=device['mac'], company_code=device['company_code'],
                                  device_type=device['device_type'], auth_code=device['auth_code'],
                                  protocol_index=1, payload=command_payload('query_state'))
-            sock.sendto(frame, ('255.255.255.255', UDP_PORT))
+            for target in targets:
+                try:
+                    sock.sendto(frame, (target, UDP_PORT))
+                except OSError:
+                    continue
         deadline = time.monotonic() + timeout
         while known and time.monotonic() < deadline:
             sock.settimeout(max(0.01, deadline - time.monotonic()))
