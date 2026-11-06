@@ -1,7 +1,7 @@
 {
   "config": {
     "step": {
-      "user": {
+      "manual": {
         "title": "Jasco myTouchSmart",
         "description": "The myTS Wi-Fi UDP and TLS relay paths are experimental. For Jasco Z-Wave products use Home Assistant's built-in Jasco integration. For myTS Wi-Fi products, keep the vendor app as the remote-control fallback.",
         "data": {
@@ -18,13 +18,46 @@
           "auth_code": "Authentication code",
           "pin": "GPIO pin"
         }
+      },
+      "user": {
+        "title": "Set up myTS devices",
+        "data": {
+          "mode": "Setup method"
+        }
+      },
+      "account": {
+        "title": "Find myTS devices",
+        "description": "Sign in to read device names and protocol identifiers. Supply a myTS APK or APKS archive once at the path below. Setup extracts signing material locally and matches account devices to your LAN through BlueberryProxy and a read-only broadcast query. Passwords and the signing key are not saved.",
+        "data": {
+          "username": "myTS email",
+          "password": "myTS password",
+          "url": "BlueberryProxy URL",
+          "app_archive": "Path to myTS app archive on Home Assistant"
+        }
+      },
+      "devices": {
+        "title": "Add discovered relay switches",
+        "description": "Select relay switches to add. Each uses GPIO pin 1. Other device types and additional pins need advanced setup. {unmatched} account devices could not be matched to a LAN address. Wake those devices and reconfigure this entry to scan again.",
+        "data": {
+          "devices": "Devices"
+        }
       }
     },
     "error": {
       "cannot_connect": "Cannot reach BlueberryProxy",
       "not_blueberry_proxy": "This API is not BlueberryProxy",
       "incomplete_device": "Enter all five device fields or leave all five empty",
-      "invalid_relay_address": "Enter a private IPv4 address for the local relay"
+      "invalid_relay_address": "Enter a private IPv4 address for the local relay",
+      "app_required": "Place your myTS APK or APKS archive at the specified path on Home Assistant.",
+      "account_failed": "Could not read the app, sign in, or reach BlueberryProxy. Check the app version, credentials, and proxy URL.",
+      "no_devices": "No myTS devices are registered to this account.",
+      "no_lan_match": "Account devices were found but no LAN addresses matched. Wake the devices and ensure HA and BlueberryProxy can access the same LAN."
+    },
+    "abort": {
+      "wrong_account": "Sign in to the same account as this integration entry.",
+      "reauth_successful": "Sign-in updated.",
+      "reconfigure_successful": "Device selection updated.",
+      "already_configured": "This account or device is already configured."
     }
   }
 }

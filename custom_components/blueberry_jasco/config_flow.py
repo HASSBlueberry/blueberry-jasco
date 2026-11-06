@@ -1,13 +1,104 @@
 import voluptuous as vol
+from homeassistant.helpers import selector
 import ipaddress
 from aiohttp import ClientError
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import DOMAIN
+from .account import load_app_key, inventory, correlate, discover_local
+from homeassistant.helpers import config_validation as cv
+import zipfile
+from pathlib import Path
 
 class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     async def async_step_user(self, user_input=None):
+        if not self.show_advanced_options:
+            return await self.async_step_account(user_input)
+        if user_input:
+            if user_input['mode'] == 'account':
+                return await self.async_step_account()
+            return await self.async_step_manual()
+        return self.async_show_form(step_id='user', data_schema=vol.Schema({
+            vol.Required('mode', default='account'): vol.In({'account': 'Find devices from myTS account', 'manual': 'Advanced local setup'})
+        }))
+
+    async def async_step_reconfigure(self, user_input=None):
+        self._reconfigure_entry = self.hass.config_entries.async_get_entry(self.context['entry_id'])
+        return await self.async_step_account()
+
+    async def async_step_account(self, user_input=None):
+        errors = {}
+        default_app = self.hass.config.path('.storage', DOMAIN, 'myts.apks')
+        source_app = Path(__file__).resolve().parents[2] / 'myTouchSmart_2.9_apkcube.apks'
+        if not Path(default_app).is_file() and source_app.is_file():
+            default_app = str(source_app)
+        existing_urls = [entry.data['url'] for entry in self.hass.config_entries.async_entries()
+                         if entry.domain in ('blueberry_jasco', 'blueberry_velux') and entry.data.get('url')]
+        default_url = existing_urls[0] if existing_urls else 'http://127.0.0.1:8054'
+        if user_input:
+            try:
+                key = await self.hass.async_add_executor_job(load_app_key, user_input.get('app_archive') or default_app)
+                session = async_get_clientsession(self.hass)
+                records = await inventory(session, user_input['username'], user_input['password'], key)
+                base = user_input['url'].rstrip('/')
+                async with session.get(base + '/status', timeout=8) as response:
+                    response.raise_for_status()
+                    if (await response.json()).get('name') != 'blueberryProxy':
+                        raise ValueError('Not BlueberryProxy')
+                async with session.get(base + '/scan', timeout=15) as response:
+                    response.raise_for_status()
+                    devices, missing = correlate(records, await response.json())
+                if missing:
+                    try:
+                        local = await self.hass.async_add_executor_job(discover_local, missing)
+                    except OSError:
+                        local = []
+                    devices.extend(local)
+                    local_macs = {device['mac'] for device in local}
+                    missing = [device for device in missing if device['mac'] not in local_macs]
+                if not records:
+                    errors['base'] = 'no_devices'
+                elif not devices:
+                    errors['base'] = 'no_lan_match'
+                else:
+                    self._account_data = {'url': base, 'verify_ssl': True, 'cloud_relay': False,
+                                          'devices': devices, 'unmatched_devices': missing}
+                    self._account_username = user_input['username'].strip().lower()
+                    return await self.async_step_devices()
+            except FileNotFoundError:
+                errors['base'] = 'app_required'
+            except (ClientError, TimeoutError, OSError, ValueError, zipfile.BadZipFile):
+                errors['base'] = 'account_failed'
+        return self.async_show_form(step_id='account', data_schema=vol.Schema({
+            vol.Required('username'): str, vol.Required('password'): selector.TextSelector({'type': 'password'}),
+            vol.Required('url', default=default_url): str,
+            vol.Optional('app_archive', default=default_app): str,
+        }), errors=errors)
+
+    async def async_step_devices(self, user_input=None):
+        devices = self._account_data['devices']
+        choices = {device['mac']: f"{device['name']} ({device['ip']}, type {device['device_type']:02X})" for device in devices}
+        if user_input:
+            selected = set(user_input['devices'])
+            chosen = [device for device in devices if device['mac'] in selected]
+            if not chosen:
+                return await self.async_step_devices()
+            await self.async_set_unique_id('account:' + self._account_username)
+            data = {'url': self._account_data['url'], 'verify_ssl': True, 'cloud_relay': False, 'devices': chosen}
+            if getattr(self, '_reconfigure_entry', None):
+                if self._reconfigure_entry.unique_id != self.unique_id:
+                    return self.async_abort(reason='wrong_account')
+                self.hass.config_entries.async_update_entry(self._reconfigure_entry, data=data)
+                await self.hass.config_entries.async_reload(self._reconfigure_entry.entry_id)
+                return self.async_abort(reason='reconfigure_successful')
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(title='myTS devices', data=data)
+        return self.async_show_form(step_id='devices', data_schema=vol.Schema({
+            vol.Required('devices', default=list(choices)): cv.multi_select(choices)
+        }), description_placeholders={'unmatched': str(len(self._account_data['unmatched_devices']))})
+
+    async def async_step_manual(self, user_input=None):
         errors = {}
         if user_input:
             url = user_input["url"].rstrip("/")
@@ -24,7 +115,7 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     configured = any(user_input.get(field) not in (None, "") for field in fields)
                     if configured and any(user_input.get(field) in (None, "") for field in fields):
                         errors["base"] = "incomplete_device"
-                        return self.async_show_form(step_id="user", data_schema=self._schema(url, verify_ssl), errors=errors)
+                        return self.async_show_form(step_id="manual", data_schema=self._schema(url, verify_ssl), errors=errors)
                     await self.async_set_unique_id(url.lower() + ("|" + mac if configured else ""))
                     self._abort_if_unique_id_configured()
                     data = {"url": url, "verify_ssl": verify_ssl}
@@ -38,7 +129,7 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 raise ValueError("relay address must be a private IPv4 address")
                         except ValueError:
                             errors["base"] = "invalid_relay_address"
-                            return self.async_show_form(step_id="user", data_schema=self._schema(url, verify_ssl), errors=errors)
+                            return self.async_show_form(step_id="manual", data_schema=self._schema(url, verify_ssl), errors=errors)
                     if configured:
                         data.update({key: user_input[key] for key in fields})
                         for key in ("company_code", "device_type", "auth_code"):
@@ -48,7 +139,7 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self.async_create_entry(title="BlueberryProxy Jasco", data=data)
             except (ClientError, TimeoutError, ValueError):
                 errors["base"] = "cannot_connect"
-        return self.async_show_form(step_id="user", data_schema=self._schema("http://127.0.0.1:8054", True), errors=errors)
+        return self.async_show_form(step_id="manual", data_schema=self._schema("http://127.0.0.1:8054", True), errors=errors)
 
     @staticmethod
     def _schema(url, verify_ssl):

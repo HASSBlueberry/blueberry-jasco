@@ -14,15 +14,16 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    data = entry.data
-    required = ("ip", "mac", "company_code", "device_type", "auth_code")
-    if not all(data.get(key) not in (None, "") for key in required):
-        return
-    device = JascoDevice(
-        ip=data["ip"], mac=data["mac"], company_code=int(data["company_code"]),
-        device_type=int(data["device_type"]), auth_code=int(data["auth_code"]),
-    )
-    async_add_entities([JascoSwitch(device, int(data.get("pin", 1)), data.get("name", "Jasco switch"))], update_before_add=True)
+    records = entry.data.get('devices', [entry.data])
+    entities = []
+    required = ('ip', 'mac', 'company_code', 'device_type', 'auth_code')
+    for data in records:
+        if not all(data.get(key) not in (None, '') for key in required):
+            continue
+        device = JascoDevice(ip=data['ip'], mac=data['mac'], company_code=int(data['company_code']),
+                             device_type=int(data['device_type']), auth_code=int(data['auth_code']))
+        entities.append(JascoSwitch(device, int(data.get('pin', 1)), data.get('name', 'Jasco switch')))
+    async_add_entities(entities, update_before_add=True)
 
 
 class JascoSwitch(SwitchEntity):

@@ -1,6 +1,33 @@
 # Jasco myTouchSmart initial reverse engineering
 
-## Home Assistant integration
+## Simplified Home Assistant setup
+
+Version 0.4 starts with a myTS email/password form and the BlueberryProxy URL.
+Supply a copy of your myTS APK or APKS once on the HA filesystem at
+`/config/.storage/blueberry_jasco/myts.apks`, or enter its path in setup.
+The supplied 2.9 app archive has been checked with the extractor. The
+integration reads signing material directly from DEX without running the app
+and without embedding the key in Python. It signs the app's login and device
+inventory requests, then discards the password, token, and signing key after
+setup. Cloud inventory discovery has not been validated with a live account.
+
+Account discovery fills device names, MACs, company codes, device types, and
+auth codes. It matches MACs through BlueberryProxy's ARP scan and makes a
+bounded, read-only broadcast query for unmatched account devices. Select the
+relay switches to add in one step. Only matching account devices become
+controllable entities. Types are shown as the app's raw device type codes;
+GPIO pin 1 is supported by the simplified path. Dimmers, multiple outputs,
+and other product types still need model-specific implementation. Their
+presence in the cloud inventory is not proof of supported control.
+
+Use Reconfigure on the account entry to rescan or change the selection.
+Restarting the integration refreshes IPs from BlueberryProxy's ARP table.
+Advanced setup retains the manual fields and experimental TLS listener. The
+simple account path leaves that listener disabled and uses local UDP for
+control. Devices absent from the LAN remain unmatched and are not given
+invented IP addresses or usable-looking controls.
+
+## Advanced local integration
 
 The `custom_components/blueberry_jasco` package connects to BlueberryProxy's
 admin API. It reports LAN scan results, recent DNS queries, proxy maps and
@@ -33,8 +60,8 @@ models.
 Use the standard Home Assistant Jasco integration for Jasco Z-Wave products
 with a Z-Wave controller. That path is local and is maintained separately from
 this myTouchSmart Wi-Fi work. For myTS Wi-Fi products, the vendor's myTS app is
-the supported remote-control path. This repository has no vendor cloud API
-integration. If the local UDP or relay path cannot be made to work, retain
+the supported remote-control path. The account API here supplies inventory for setup; remote cloud command transport
+is not yet implemented. If the local UDP or relay path cannot be made to work, retain
 control in the vendor app rather than treating this experimental TLS server as
 a supported provider replacement.
 

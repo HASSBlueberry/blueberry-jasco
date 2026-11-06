@@ -5,6 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .protocol import JascoDevice, send_command, send_login
 from .const import DOMAIN
+from .account import normalize_mac
 from .cloud_server import JascoCloudServer, detect_lan_ip
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -13,6 +14,26 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     base = entry.data["url"].rstrip("/")
+    if entry.data.get('devices'):
+        try:
+            async with session.get(base + '/scan', timeout=10) as response:
+                response.raise_for_status()
+                scan = await response.json()
+            addresses = {}
+            for row in scan.get('arp', []):
+                try:
+                    from ipaddress import IPv4Address
+                    address = IPv4Address(row['ip'])
+                    if address.is_private:
+                        addresses[normalize_mac(row['mac'])] = str(address)
+                except (KeyError, ValueError):
+                    continue
+            devices = [{**device, 'ip': addresses.get(device['mac'], device['ip'])}
+                       for device in entry.data['devices']]
+            if devices != entry.data['devices']:
+                hass.config_entries.async_update_entry(entry, data={**entry.data, 'devices': devices})
+        except (ClientError, TimeoutError, ValueError):
+            pass
     for filename, transformer_id, kind in [("jasco-request.js", "jasco-request", "request-script"), ("jasco-response.js", "jasco-response", "response-script")]:
         script = (Path(__file__).parent / "transforms" / filename).read_text()
         try:
