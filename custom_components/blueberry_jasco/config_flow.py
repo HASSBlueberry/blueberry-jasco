@@ -19,8 +19,6 @@ _LOGGER = logging.getLogger(__name__)
 class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     async def async_step_user(self, user_input=None):
-        if not self.show_advanced_options:
-            return await self.async_step_account(user_input)
         if user_input:
             if user_input['mode'] == 'account':
                 return await self.async_step_account()
