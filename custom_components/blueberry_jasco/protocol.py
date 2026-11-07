@@ -10,6 +10,9 @@ import ipaddress
 import itertools
 import socket
 import struct
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 MAGIC = 0xA1
@@ -106,6 +109,54 @@ class JascoDevice:
             raise ValueError("port must be between 1 and 65535")
 
 
+_TRANSPORT_LOCK = threading.Lock()
+
+@contextmanager
+def local_socket(timeout=3.0,broadcast=False):
+    """Match q0.a's fixed UDP source port and serialize requests in HA."""
+    with _TRANSPORT_LOCK:
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            if broadcast:sock.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
+            sock.bind(('0.0.0.0',UDP_PORT))
+            sock.settimeout(timeout)
+            yield sock
+
+def lan_interfaces():
+    """Read IPv4 addresses and directed broadcasts without assuming a /24."""
+    result=[]
+    try:
+        import fcntl
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
+            for _,name in socket.if_nameindex():
+                try:
+                    request=struct.pack('256s',name.encode()[:15])
+                    ip=socket.inet_ntoa(fcntl.ioctl(sock.fileno(),0x8915,request)[20:24])
+                    mask=socket.inet_ntoa(fcntl.ioctl(sock.fileno(),0x891b,request)[20:24])
+                    address=ipaddress.IPv4Address(ip)
+                    if not address.is_private or address.is_loopback:continue
+                    network=ipaddress.IPv4Network(ip+'/'+mask,strict=False)
+                    result.append({'ip':ip,'cidr':str(network),'broadcast':str(network.broadcast_address)})
+                except OSError:continue
+    except (ImportError,OSError):pass
+    return result
+
+def _exchange(device,frame,timeout):
+    with local_socket(timeout) as sock:
+        sock.sendto(frame,(device.ip,device.port))
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            sock.settimeout(max(.01,deadline-time.monotonic()))
+            try:response,(ip,_)=sock.recvfrom(65535)
+            except socket.timeout:return None
+            if ip!=device.ip:continue
+            try:decoded=decode_frame(response)
+            except ValueError:continue
+            if decoded['mac']!=device.mac.lower().replace('-',':'):continue
+            if any(decoded[key]!=getattr(device,key) for key in ('company_code','device_type','auth_code')):continue
+            return response
+    return None
+
 def send_command(device: JascoDevice, command: str, *, pin: int | None = None,
                  state: bool | None = None, timeout: float = 3.0) -> dict:
     """Send a direct local UDP frame to the device on port 35932.
@@ -121,13 +172,8 @@ def send_command(device: JascoDevice, command: str, *, pin: int | None = None,
                          company_code=device.company_code,
                          device_type=device.device_type,
                          auth_code=device.auth_code, locked=device.locked)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
-        sock.sendto(frame, (device.ip, device.port))
-        try:
-            response, _ = sock.recvfrom(4096)
-        except socket.timeout:
-            return {"transport": "udp", "response_timeout": True}
+    response=_exchange(device,frame,timeout)
+    if response is None:return {"transport":"udp","response_timeout":True}
     try:
         decoded = decode_frame(response)
         return {"transport": "udp",
@@ -143,14 +189,7 @@ def send_raw_frame(device: JascoDevice, frame: bytes, *, timeout: float = 3.0) -
     decoded = decode_frame(frame)
     if decoded["mac"].lower() != device.mac.lower():
         raise ValueError("frame MAC does not match the configured device")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
-        sock.sendto(frame, (device.ip, device.port))
-        try:
-            response, _ = sock.recvfrom(4096)
-            return response
-        except socket.timeout:
-            return None
+    return _exchange(device,frame,timeout)
 
 
 def send_login(ip: str, username: str, password: str, *, status: int = 0,
@@ -163,8 +202,7 @@ def send_login(ip: str, username: str, password: str, *, status: int = 0,
     frame = encode_frame(mac="00:00:00:00:00:00", payload=payload,
                          protocol_index=next(_login_sequence) % 32768,
                          company_code=0, device_type=0, auth_code=0)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
+    with local_socket(timeout) as sock:
         sock.sendto(frame, (ip, UDP_PORT))
         try:
             response, _ = sock.recvfrom(4096)

@@ -40,8 +40,8 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not Path(default_app).is_file() and source_app.is_file():
             default_app = str(source_app)
         existing_urls = [entry.data['url'] for entry in self.hass.config_entries.async_entries()
-                         if entry.domain in ('blueberry_jasco', 'blueberry_velux') and entry.data.get('url')]
-        default_url = existing_urls[0] if existing_urls else 'http://127.0.0.1:8054'
+                         if entry.domain in ('blueberry_jasco','blueberry_velux','blueberry_proxy') and entry.data.get('url')]
+        default_url = existing_urls[0] if existing_urls else 'http://127.0.0.1:8055'
         phase = 'archive'
         version = getattr(self, '_detected_version', 'not yet read')
         details = ''
@@ -112,13 +112,13 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_scan(self, user_input=None):
         if not getattr(self, '_scan_task', None):
             async def local_probe(missing, candidates):
-                return await self.hass.async_add_executor_job(discover_local, missing, 3.0, candidates)
+                return await self.hass.async_add_executor_job(discover_local, missing, 6.0, candidates)
             context = self._discovery_context
             script = await self.hass.async_add_executor_job(
                 (Path(__file__).parent / 'transforms' / 'jasco-uscan.js').read_text)
             self._scan_task = self.hass.async_create_task(discover_account_devices(
                 async_get_clientsession(self.hass), context['base'], context['records'], local_probe,
-                self._scan_parameters, scanner_script=script))
+                self._scan_parameters, scanner_script=script,inventory_urls=[entry.data['url'] for entry in self.hass.config_entries.async_entries() if entry.domain=='blueberry_quantum' and entry.data.get('url')]))
         if not self._scan_task.done():
             return self.async_show_progress(step_id='scan', progress_action='network_scan', progress_task=self._scan_task)
         self._scan_result = self._scan_task.result()
@@ -208,7 +208,7 @@ class BlueberryProxyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self.async_create_entry(title="BlueberryProxy Jasco", data=data)
             except (ClientError, TimeoutError, ValueError):
                 errors["base"] = "cannot_connect"
-        return self.async_show_form(step_id="manual", data_schema=self._schema("http://127.0.0.1:8054", True), errors=errors)
+        return self.async_show_form(step_id="manual", data_schema=self._schema("http://127.0.0.1:8055", True), errors=errors)
 
     @staticmethod
     def _schema(url, verify_ssl):
