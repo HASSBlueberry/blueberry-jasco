@@ -10,7 +10,7 @@ function scan(ctx) {
   }
   function hex(bytes) { return bytes.map(value => value.toString(16).padStart(2, '0')).join(''); }
   const frames = devices.map(device => {
-    const mac = device.mac.split(':').map(value => parseInt(value, 16)).reverse();
+    const mac = device.mac.split(':').map(value => parseInt(value, 16));
     const packet = command => hex([0xa1, device.locked ? 4 : 0, ...mac, 0, 7, 0, 1,
       device.company_code, device.device_type, device.auth_code >> 8, device.auth_code & 255, command]);
     return {device, mac, discovery:packet(0x23), query:packet(0x10)};

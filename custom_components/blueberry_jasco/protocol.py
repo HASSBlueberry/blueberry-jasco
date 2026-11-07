@@ -26,7 +26,9 @@ def _mac_bytes(mac: str) -> bytes:
     if len(parts) != 6:
         raise ValueError("MAC must contain six hexadecimal octets")
     try:
-        return bytes(int(part, 16) for part in reversed(parts))
+        # r0.c.i reverses the numeric MAC, then r0.c.g writes it little endian.
+        # Their composition preserves the cloud string byte order.
+        return bytes(int(part, 16) for part in parts)
     except ValueError as err:
         raise ValueError("MAC contains a non-hexadecimal octet") from err
 
@@ -55,7 +57,7 @@ def decode_frame(frame: bytes) -> dict:
     length, protocol_index, company_code, device_type, auth_code = struct.unpack(">HHBBH", frame[8:16])
     if length != len(frame) - HEADER_SIZE + 6:
         raise ValueError("Jasco frame length field does not match payload")
-    mac = ":".join(f"{part:02x}" for part in reversed(frame[2:8]))
+    mac = ":".join(f"{part:02x}" for part in frame[2:8])
     return {"mac": mac, "locked": bool(frame[1] & 4), "protocol_index": protocol_index,
             "company_code": company_code, "device_type": device_type,
             "auth_code": auth_code, "payload": frame[16:]}
