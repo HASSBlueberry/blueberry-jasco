@@ -2,11 +2,18 @@ from datetime import timedelta
 import logging
 from aiohttp import ClientError
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, CoordinatorEntity
 from .const import DOMAIN, DEFAULT_NAME
+from .diagnostics import device_diagnostics, switch_key
+
+SCAN_INTERVAL = timedelta(seconds=10)
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    # These entities do not depend on proxy availability or switch availability.
+    async_add_entities([JascoConnectionSensor(entry.entry_id,record)
+                        for record in entry.data.get('devices',[entry.data]) if record.get('mac')])
     base = hass.data[DOMAIN][entry.entry_id]["url"]
     session = async_get_clientsession(hass)
     async def update():
@@ -84,3 +91,28 @@ class JascoCandidateSensor(CoordinatorEntity, SensorEntity):
                                "vendor_match": bool(names)})
         return {"candidates": candidates,
                 "disclaimer": "A network scan finds hosts, not device identity. DNS names are leads only."}
+
+
+class JascoConnectionSensor(SensorEntity):
+    """Publish polling failures without relying on unavailable switch attributes."""
+    _attr_has_entity_name=True
+    _attr_icon="mdi:lan-connect"
+    _attr_entity_category=EntityCategory.DIAGNOSTIC
+    _attr_available=True
+
+    def __init__(self,entry_id,record):
+        self._entry_id,self._record=entry_id,record
+        self._attr_unique_id=switch_key(record)+"_connection"
+        self._attr_name=(record.get('name') or 'myTS device')+" connection"
+
+    @property
+    def native_value(self):return self.extra_state_attributes['status']
+
+    @property
+    def extra_state_attributes(self):return device_diagnostics(self.hass,self._entry_id,self._record)
+
+    @property
+    def device_info(self):
+        mac=self._record['mac'].lower().replace('-',':')
+        return {'identifiers':{(DOMAIN,mac.replace(':',''))},'connections':{('mac',mac)},
+                'name':self._record.get('name') or 'myTS device','manufacturer':'Jasco'}

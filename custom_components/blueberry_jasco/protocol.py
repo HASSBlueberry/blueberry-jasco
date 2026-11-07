@@ -153,8 +153,35 @@ def lan_interfaces():
     except (ImportError,OSError):pass
     return result
 
-def _exchange(device,frame,timeout,attempts=1):
-    request=decode_frame(frame)
+def reply_matches(device,request_frame,response,ip,port):
+    if ip!=device.ip or port!=device.port:return False
+    try:
+        request=decode_frame(request_frame);decoded=decode_frame(response)
+    except ValueError:return False
+    if decoded['mac']!=device.mac.lower().replace('-',':'):return False
+    if any(decoded[key]!=getattr(device,key) for key in ('company_code','device_type','auth_code')):return False
+    if decoded['protocol_index']&255 != request['protocol_index']&255:return False
+    payload=decoded['payload'];expected=request['payload']
+    if expected and (not payload or payload[0]!=expected[0]):return False
+    if expected and expected[0] in (1,2):
+        if len(payload)<3 or payload[1]!=expected[1] or payload[2] not in (0,255):return False
+    return True
+
+
+def observe_reply(frame,ip,port):
+    """Summarize protocol evidence without exposing header authentication codes."""
+    result={'ip':ip,'port':port,'bytes':len(frame)}
+    try:decoded=decode_frame(frame)
+    except ValueError:return {**result,'error':'Invalid myTS frame'}
+    payload=decoded['payload']
+    result.update({'mac':decoded['mac'],'sequence':decoded['protocol_index'],'flags':frame[1],
+                   'company_code':decoded['company_code'],'device_type':decoded['device_type'],
+                   'command':payload[0] if payload else None})
+    if payload and payload[0] in (1,2,3):result['gpio_payload']=payload[:3].hex()
+    return result
+
+
+def _exchange(device,frame,timeout,attempts=1,observation=None):
     with local_socket(timeout) as sock:
         deadline=time.monotonic()+timeout
         retry_at=0;sent=0
@@ -166,18 +193,10 @@ def _exchange(device,frame,timeout,attempts=1):
             sock.settimeout(max(.01,min(deadline-time.monotonic(),retry_at-time.monotonic() if sent<attempts else timeout)))
             try:response,(ip,port)=sock.recvfrom(65535)
             except socket.timeout:continue
-            if ip!=device.ip or port!=device.port:continue
-            try:decoded=decode_frame(response)
-            except ValueError:continue
-            if decoded['mac']!=device.mac.lower().replace('-',':'):continue
-            if any(decoded[key]!=getattr(device,key) for key in ('company_code','device_type','auth_code')):continue
-            # The APK's u0.a correlates replies using the low sequence byte.
-            if decoded['protocol_index']&255 != request['protocol_index']&255:continue
-            payload=decoded['payload'];expected=request['payload']
-            if expected and (not payload or payload[0]!=expected[0]):continue
-            if expected and expected[0] in (1,2):
-                if len(payload)<3 or payload[1]!=expected[1] or payload[2] not in (0,255):continue
-            return response
+            if observation is not None:
+                observation['received_packets']=observation.get('received_packets',0)+1
+                observation['last_received']=observe_reply(response,ip,port)
+            if reply_matches(device,frame,response,ip,port):return response
     return None
 
 
@@ -196,11 +215,12 @@ def send_command(device: JascoDevice, command: str, *, pin: int | None = None,
                          company_code=device.company_code,
                          device_type=device.device_type,
                          auth_code=device.auth_code, locked=device.locked)
-    response=_exchange(device,frame,timeout,attempts=3 if command in ("read_pin","discover") else 1)
-    if response is None:return {"transport":"udp","response_timeout":True}
+    observation={'received_packets':0,'last_received':None}
+    response=_exchange(device,frame,timeout,attempts=3 if command in ("read_pin","discover") else 1,observation=observation)
+    if response is None:return {"transport":"udp","response_timeout":True,**observation}
     try:
         decoded = decode_frame(response)
-        return {"transport": "udp",
+        return {"transport": "udp",**observation,
                 "response": {k: v for k, v in decoded.items() if k != "payload"},
                 "payload_hex": decoded["payload"].hex()}
     except ValueError:

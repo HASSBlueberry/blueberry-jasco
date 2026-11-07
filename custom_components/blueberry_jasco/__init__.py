@@ -4,7 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .protocol import JascoDevice, send_command, send_login
-from .const import DOMAIN
+from .const import DOMAIN, INTEGRATION_VERSION
 from .account import normalize_mac
 from .cloud_server import JascoCloudServer, detect_lan_ip
 
@@ -43,7 +43,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             break
     domain_data = hass.data.setdefault(DOMAIN, {})
     relay_servers = domain_data.setdefault("relay_servers", {})
-    entry_data = {"url": base, "verify_ssl": entry.data.get("verify_ssl", True)}
+    entry_data = {"url": base, "verify_ssl": entry.data.get("verify_ssl", True), "integration_version":INTEGRATION_VERSION}
     if entry.data.get("cloud_relay", True):
         values = entry.data
         device = None
