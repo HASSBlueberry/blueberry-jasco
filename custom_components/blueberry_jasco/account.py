@@ -94,7 +94,7 @@ def normalize_mac(value):
 
 def correlate(records, scan):
     addresses = {}
-    for row in scan.get('arp', []):
+    for row in [*scan.get('discoveries', []),*scan.get('arp', [])]:
         if not isinstance(row, dict):
             continue
         try:
@@ -125,53 +125,44 @@ def correlate(records, scan):
     return found, missing
 
 
-def discover_local(devices, timeout=3.0, candidates=None):
-    """Query only account-owned MACs and accept responses with matching headers."""
+def discover_local(devices, timeout=6.0, candidates=None):
+    """Use the APK's discovery command and fixed port, validating owned headers."""
     import socket
     import time
-    from .protocol import command_payload, decode_frame, encode_frame, UDP_PORT
-    known = {device['mac']: device for device in devices[:128]}
-    found = {}
-    targets = ['255.255.255.255']
-    for candidate in (candidates or [])[:256]:
+    from .protocol import command_payload,decode_frame,encode_frame,UDP_PORT,local_socket,lan_interfaces
+    known={device['mac']:device for device in devices[:128]}
+    if not known:return []
+    found={}
+    interfaces=lan_interfaces()
+    own_ips={row['ip'] for row in interfaces}
+    targets=[row['broadcast'] for row in interfaces] or ['255.255.255.255']
+    for candidate in (candidates or [])[:4096]:
         try:
-            address = ipaddress.IPv4Address(candidate)
-            if address.is_private and not address.is_loopback:
-                targets.append(str(address))
-        except ValueError:
-            continue
-    targets = list(dict.fromkeys(targets))
-    if len(known) * len(targets) > 2048:
-        targets = targets[:max(1, 2048 // max(1, len(known)))]
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(('0.0.0.0', 0))
-        for device in known.values():
-            frame = encode_frame(mac=device['mac'], company_code=device['company_code'],
-                                 device_type=device['device_type'], auth_code=device['auth_code'],
-                                 protocol_index=1, payload=command_payload('query_state'))
-            for target in targets:
+            address=ipaddress.IPv4Address(candidate)
+            if address.is_private and not address.is_loopback and str(address) not in own_ips:targets.append(str(address))
+        except ValueError:continue
+    targets=list(dict.fromkeys(targets))
+    targets=targets[:max(1,4096//len(known))]
+    with local_socket(min(timeout,.2),broadcast=True) as sock:
+        deadline=time.monotonic()+timeout
+        for attempt in range(3):
+            for device in known.values():
+                if device['mac'] in found:continue
+                frame=encode_frame(mac=device['mac'],company_code=device['company_code'],device_type=device['device_type'],auth_code=device['auth_code'],protocol_index=1,payload=bytes((0x23,)))
+                for target in targets:
+                    try:sock.sendto(frame,(target,UDP_PORT))
+                    except OSError:continue
+            window=min(deadline,time.monotonic()+timeout/3)
+            while len(found)<len(known) and time.monotonic()<window:
+                sock.settimeout(max(.01,min(.2,window-time.monotonic())))
+                try:frame,(address,_)=sock.recvfrom(65535)
+                except socket.timeout:continue
+                if address in own_ips:continue
                 try:
-                    sock.sendto(frame, (target, UDP_PORT))
-                except OSError:
-                    continue
-        deadline = time.monotonic() + timeout
-        while known and time.monotonic() < deadline:
-            sock.settimeout(max(0.01, deadline - time.monotonic()))
-            try:
-                frame, (address, _) = sock.recvfrom(65535)
-            except socket.timeout:
-                break
-            try:
-                message = decode_frame(frame)
-                device = known.get(message['mac'])
-                if not device or not ipaddress.IPv4Address(address).is_private:
-                    continue
-                if any(message[key] != device[key] for key in ('company_code', 'device_type', 'auth_code')):
-                    continue
-                found[device['mac']] = {**device, 'ip': address}
-                if len(found) == len(known):
-                    break
-            except (ValueError, KeyError):
-                continue
+                    message=decode_frame(frame);device=known.get(message['mac'])
+                    if not device or not ipaddress.IPv4Address(address).is_private:continue
+                    if any(message[key]!=device[key] for key in ('company_code','device_type','auth_code')):continue
+                    found[device['mac']]={**device,'ip':address,'locked':message['locked']}
+                except (ValueError,KeyError):continue
+            if len(found)==len(known):break
     return list(found.values())

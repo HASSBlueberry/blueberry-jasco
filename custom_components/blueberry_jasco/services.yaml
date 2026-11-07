@@ -54,6 +54,7 @@ send_local_command:
       selector:
         select:
           options:
+            - discover
             - query_state
             - refresh
             - read_pin

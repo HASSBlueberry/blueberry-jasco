@@ -10,6 +10,9 @@ import ipaddress
 import itertools
 import socket
 import struct
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 MAGIC = 0xA1
@@ -60,6 +63,8 @@ def decode_frame(frame: bytes) -> dict:
 
 def command_payload(command: str, *, pin: int | None = None,
                     state: bool | None = None) -> bytes:
+    if command == "discover":
+        return bytes((0x23,))
     if command == "query_state":
         return bytes((0x10,))
     if command == "refresh":
@@ -74,7 +79,7 @@ def command_payload(command: str, *, pin: int | None = None,
         # The APK's t0.a.p emits {1, pin, 0xff|0} for relay writes.
         # Command 0x08 is a countdown query, not a switch command.
         return bytes((0x01, pin, 0xFF if state else 0x00))
-    raise ValueError("command must be query_state, refresh, read_pin, or set_switch")
+    raise ValueError("command must be discover, query_state, refresh, read_pin, or set_switch")
 
 
 def login_payload(username: str, password: str, status: int = 0) -> bytes:
@@ -106,6 +111,76 @@ class JascoDevice:
             raise ValueError("port must be between 1 and 65535")
 
 
+_TRANSPORT_LOCK = threading.Lock()
+_SEQUENCE_LOCK = threading.Lock()
+_COMMAND_SEQUENCES = {}
+
+def next_protocol_index(device):
+    """WifiDevice.getProtocolIndex advances for every outgoing command."""
+    key=device.mac.lower().replace("-", ":")
+    with _SEQUENCE_LOCK:
+        index=_COMMAND_SEQUENCES.get(key,device.protocol_index)
+        _COMMAND_SEQUENCES[key]=(index+1)%32768
+        return index
+
+@contextmanager
+def local_socket(timeout=3.0,broadcast=False):
+    """Match q0.a's fixed UDP source port and serialize requests in HA."""
+    with _TRANSPORT_LOCK:
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            if broadcast:sock.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
+            sock.bind(('0.0.0.0',UDP_PORT))
+            sock.settimeout(timeout)
+            yield sock
+
+def lan_interfaces():
+    """Read IPv4 addresses and directed broadcasts without assuming a /24."""
+    result=[]
+    try:
+        import fcntl
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
+            for _,name in socket.if_nameindex():
+                try:
+                    request=struct.pack('256s',name.encode()[:15])
+                    ip=socket.inet_ntoa(fcntl.ioctl(sock.fileno(),0x8915,request)[20:24])
+                    mask=socket.inet_ntoa(fcntl.ioctl(sock.fileno(),0x891b,request)[20:24])
+                    address=ipaddress.IPv4Address(ip)
+                    if not address.is_private or address.is_loopback:continue
+                    network=ipaddress.IPv4Network(ip+'/'+mask,strict=False)
+                    result.append({'ip':ip,'cidr':str(network),'broadcast':str(network.broadcast_address)})
+                except OSError:continue
+    except (ImportError,OSError):pass
+    return result
+
+def _exchange(device,frame,timeout,attempts=1):
+    request=decode_frame(frame)
+    with local_socket(timeout) as sock:
+        deadline=time.monotonic()+timeout
+        retry_at=0;sent=0
+        while time.monotonic()<deadline:
+            now=time.monotonic()
+            if sent<attempts and now>=retry_at:
+                sock.sendto(frame,(device.ip,device.port))
+                sent+=1;retry_at=now+timeout/attempts
+            sock.settimeout(max(.01,min(deadline-time.monotonic(),retry_at-time.monotonic() if sent<attempts else timeout)))
+            try:response,(ip,port)=sock.recvfrom(65535)
+            except socket.timeout:continue
+            if ip!=device.ip or port!=device.port:continue
+            try:decoded=decode_frame(response)
+            except ValueError:continue
+            if decoded['mac']!=device.mac.lower().replace('-',':'):continue
+            if any(decoded[key]!=getattr(device,key) for key in ('company_code','device_type','auth_code')):continue
+            # The APK's u0.a correlates replies using the low sequence byte.
+            if decoded['protocol_index']&255 != request['protocol_index']&255:continue
+            payload=decoded['payload'];expected=request['payload']
+            if expected and (not payload or payload[0]!=expected[0]):continue
+            if expected and expected[0] in (1,2):
+                if len(payload)<3 or payload[1]!=expected[1] or payload[2] not in (0,255):continue
+            return response
+    return None
+
+
 def send_command(device: JascoDevice, command: str, *, pin: int | None = None,
                  state: bool | None = None, timeout: float = 3.0) -> dict:
     """Send a direct local UDP frame to the device on port 35932.
@@ -117,17 +192,12 @@ def send_command(device: JascoDevice, command: str, *, pin: int | None = None,
     device.validate()
     payload = command_payload(command, pin=pin, state=state)
     frame = encode_frame(mac=device.mac, payload=payload,
-                         protocol_index=device.protocol_index,
+                         protocol_index=next_protocol_index(device),
                          company_code=device.company_code,
                          device_type=device.device_type,
                          auth_code=device.auth_code, locked=device.locked)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
-        sock.sendto(frame, (device.ip, device.port))
-        try:
-            response, _ = sock.recvfrom(4096)
-        except socket.timeout:
-            return {"transport": "udp", "response_timeout": True}
+    response=_exchange(device,frame,timeout,attempts=3 if command in ("read_pin","discover") else 1)
+    if response is None:return {"transport":"udp","response_timeout":True}
     try:
         decoded = decode_frame(response)
         return {"transport": "udp",
@@ -143,14 +213,7 @@ def send_raw_frame(device: JascoDevice, frame: bytes, *, timeout: float = 3.0) -
     decoded = decode_frame(frame)
     if decoded["mac"].lower() != device.mac.lower():
         raise ValueError("frame MAC does not match the configured device")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
-        sock.sendto(frame, (device.ip, device.port))
-        try:
-            response, _ = sock.recvfrom(4096)
-            return response
-        except socket.timeout:
-            return None
+    return _exchange(device,frame,timeout)
 
 
 def send_login(ip: str, username: str, password: str, *, status: int = 0,
@@ -163,8 +226,7 @@ def send_login(ip: str, username: str, password: str, *, status: int = 0,
     frame = encode_frame(mac="00:00:00:00:00:00", payload=payload,
                          protocol_index=next(_login_sequence) % 32768,
                          company_code=0, device_type=0, auth_code=0)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout)
+    with local_socket(timeout) as sock:
         sock.sendto(frame, (ip, UDP_PORT))
         try:
             response, _ = sock.recvfrom(4096)
